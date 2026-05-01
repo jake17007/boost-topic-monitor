@@ -1,0 +1,20 @@
+hn.db
+hn.db-journal
+hn.db-wal
+hn.db-shm
+data.db
+data.db-journal
+data.db-wal
+data.db-shm
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store
+
+# web
+web/node_modules/
+web/dist/
+web/.vite/
+web/tsconfig.tsbuildinfo
+*.log
