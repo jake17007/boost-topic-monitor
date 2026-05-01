@@ -1,9 +1,9 @@
 """TimesFM 2.5-backed score forecasting.
 
-The model is loaded lazily in a background thread so server startup stays fast.
-Forecasts are computed by a scheduler-driven background job after each snapshot
-tick and cached in-memory; the API just reads the cache so request latency is
-unaffected by model inference.
+Forecasts are persisted in SQLite (the `forecasts` table) so they survive
+restarts. The model is loaded lazily in a background thread; `forecast_job`
+runs on a scheduler tick (default hourly) and only re-runs the model on posts
+whose latest snapshot ts changed since the last cached forecast.
 """
 from __future__ import annotations
 
@@ -17,32 +17,35 @@ from . import db
 
 log = logging.getLogger("hn-monitor.forecast")
 
-# Resample raw snapshots to evenly-spaced 1-minute samples before forecasting.
-RESAMPLE_INTERVAL = 60
-# Predict the next 60 minutes.
-HORIZON_STEPS = 60
-# TimesFM 2.5 supports up to 1024 context.
-CONTEXT_MAX = 1024
-# Require at least N minutes of post history before producing a forecast.
+RESAMPLE_INTERVAL = 60        # 1-minute samples
+HORIZON_STEPS = 60            # predict 60 minutes ahead
+CONTEXT_MAX = 1024            # TimesFM 2.5 max context
 MIN_HISTORY_MINUTES = 5
-# Forecasts older than this many seconds are dropped from cache (cheap GC).
-CACHE_MAX_AGE = 6 * 3600
-
-# (post_id) -> (last_input_ts, computed_at, [(ts, score), ...])
-_forecasts: dict[int, tuple[int, int, list[tuple[int, int]]]] = {}
-_cache_lock = threading.Lock()
 
 _model = None
 _model_lock = threading.Lock()
 _model_state = "unloaded"  # unloaded | loading | ready | failed
+
+# Live job state, surfaced to the UI for kicking off + tracking progress.
+_job_state: dict = {
+    "state": "idle",  # idle | running
+    "total": 0,
+    "processed": 0,
+    "wrote": 0,
+    "started_at": 0,
+    "finished_at": 0,
+}
 
 
 def model_state() -> str:
     return _model_state
 
 
+def get_job_state() -> dict:
+    return dict(_job_state)
+
+
 def _start_loader() -> None:
-    """Load TimesFM on a background thread. Idempotent."""
     global _model_state
     with _model_lock:
         if _model_state in ("loading", "ready", "failed"):
@@ -85,15 +88,15 @@ def _start_loader() -> None:
 
 
 def _resample(series: list[tuple[int, int]]) -> tuple[int, list[float]] | None:
-    """Forward-fill snapshots to evenly-spaced 1-minute samples.
-
-    Returns (last_sample_ts, values) or None if we don't have enough history.
-    """
     if len(series) < 2:
         return None
     start = series[0][0]
     end = series[-1][0]
     if end - start < RESAMPLE_INTERVAL * MIN_HISTORY_MINUTES:
+        return None
+    # Skip posts with no engagement variation — no signal to learn from.
+    scores = [s[1] for s in series]
+    if min(scores) == max(scores):
         return None
     times = list(range(start, end + 1, RESAMPLE_INTERVAL))
     if len(times) > CONTEXT_MAX:
@@ -108,92 +111,122 @@ def _resample(series: list[tuple[int, int]]) -> tuple[int, list[float]] | None:
     return times[-1], values
 
 
-def _predict_sync(post_id: int, series: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Run the model. Caller is responsible for off-loading from the event loop."""
+def _predict_batch_sync(
+    items: list[tuple[int, list[tuple[int, int]]]],
+) -> dict[int, tuple[int, list[tuple[int, int]]]]:
+    """Run the model on a batch. Returns {pid: (last_input_ts, points)}."""
+    if not items:
+        return {}
     with _model_lock:
         m = _model
     if m is None:
-        return []
-    resampled = _resample(series)
-    if not resampled:
-        return []
-    end_ts, values = resampled
+        return {}
+
+    inputs = []
+    metas = []  # (pid, last_input_ts, end_ts, last_actual)
+    for pid, series in items:
+        resampled = _resample(series)
+        if not resampled:
+            continue
+        end_ts, values = resampled
+        inputs.append(values)
+        metas.append((pid, series[-1][0], end_ts, int(values[-1])))
+
+    if not inputs:
+        return {}
+
     try:
         import numpy as np
-        point_forecast, _ = m.forecast(
-            horizon=HORIZON_STEPS,
-            inputs=[np.array(values, dtype=np.float32)],
-        )
+        arrays = [np.array(v, dtype=np.float32) for v in inputs]
+        point_forecast, _ = m.forecast(horizon=HORIZON_STEPS, inputs=arrays)
     except Exception as e:
-        log.warning("forecast failed for post %d: %s", post_id, e)
-        return []
-    horizon = point_forecast[0]
-    last_actual = int(values[-1])
-    result: list[tuple[int, int]] = []
-    for i, v in enumerate(horizon):
-        ts = end_ts + RESAMPLE_INTERVAL * (i + 1)
-        # HN scores are monotonically non-decreasing on alive posts; clip to that.
-        score = max(last_actual, int(round(float(v))))
-        last_actual = score
-        result.append((ts, score))
-    return result
+        log.warning("batched forecast failed (%d inputs): %s", len(inputs), e)
+        return {}
+
+    out: dict[int, tuple[int, list[tuple[int, int]]]] = {}
+    for (pid, last_input_ts, end_ts, _last_actual), horizon in zip(metas, point_forecast):
+        result: list[tuple[int, int]] = []
+        for i, v in enumerate(horizon):
+            ts = end_ts + RESAMPLE_INTERVAL * (i + 1)
+            result.append((ts, int(round(float(v)))))
+        out[pid] = (last_input_ts, result)
+    return out
 
 
 def cached_forecast(post_id: int) -> list[tuple[int, int]]:
-    with _cache_lock:
-        cached = _forecasts.get(post_id)
-    return list(cached[2]) if cached else []
-
-
-def _gc_cache(now: int) -> None:
-    cutoff = now - CACHE_MAX_AGE
-    with _cache_lock:
-        stale = [pid for pid, (_, computed_at, _) in _forecasts.items() if computed_at < cutoff]
-        for pid in stale:
-            _forecasts.pop(pid, None)
+    return db.get_forecast(post_id)
 
 
 def _todo_for_refresh(ids: Iterable[int]) -> list[tuple[int, list[tuple[int, int]]]]:
-    """Return (post_id, series) pairs whose cached forecast is stale or missing."""
+    """Posts with enough history whose cached forecast is missing or stale."""
     ids = list(ids)
     series_map = db.series_for_ids(ids)
+    cached_ts = db.get_forecast_input_ts(ids)
+    min_span = RESAMPLE_INTERVAL * MIN_HISTORY_MINUTES
     todo: list[tuple[int, list[tuple[int, int]]]] = []
-    with _cache_lock:
-        for pid in ids:
-            s = series_map.get(pid, [])
-            if not s:
-                continue
-            cached = _forecasts.get(pid)
-            if cached and cached[0] == s[-1][0]:
-                continue
-            todo.append((pid, list(s)))
+    for pid in ids:
+        s = series_map.get(pid, [])
+        if len(s) < 2:
+            continue
+        if s[-1][0] - s[0][0] < min_span:
+            continue
+        if cached_ts.get(pid) == s[-1][0]:
+            continue  # up to date
+        todo.append((pid, list(s)))
     return todo
 
 
 async def forecast_job() -> None:
-    """Refresh forecasts for active posts. Runs on a scheduler tick."""
+    """Refresh forecasts for active posts. Triggered by the scheduler or by
+    POST /api/forecast/run. Concurrent calls are skipped (only one runs at a
+    time)."""
     if _model_state == "unloaded":
         _start_loader()
         return
     if _model_state != "ready":
-        return  # still loading or failed; will retry next tick
+        return
+    # Cooperative single-run guard. Coroutines aren't preempted between
+    # statements (no await), so this check-and-set is atomic.
+    if _job_state["state"] == "running":
+        log.info("forecast: already running; skip")
+        return
 
     now = int(time.time())
     ids = db.active_post_ids(now, 24 * 3600)
     if not ids:
         return
-
     todo = _todo_for_refresh(ids)
     if not todo:
         return
-    todo = todo[:60]
 
-    log.info("forecasting %d posts", len(todo))
+    BATCH = 64
+    total = len(todo)
+    n_batches = (total + BATCH - 1) // BATCH
+    _job_state.update(
+        state="running",
+        total=total,
+        processed=0,
+        wrote=0,
+        started_at=int(time.time()),
+        finished_at=0,
+    )
+    log.info("forecasting %d posts (%d batches of %d)", total, n_batches, BATCH)
     t0 = time.time()
-    for pid, s in todo:
-        result = await asyncio.to_thread(_predict_sync, pid, s)
-        if result:
-            with _cache_lock:
-                _forecasts[pid] = (s[-1][0], int(time.time()), result)
-    log.info("forecast batch done in %.1fs", time.time() - t0)
-    _gc_cache(now)
+    written = 0
+    try:
+        for batch_i, chunk_start in enumerate(range(0, total, BATCH), start=1):
+            chunk = todo[chunk_start:chunk_start + BATCH]
+            b0 = time.time()
+            results = await asyncio.to_thread(_predict_batch_sync, chunk)
+            for pid, (last_input_ts, points) in results.items():
+                db.save_forecast(pid, last_input_ts, points)
+                written += 1
+            _job_state["processed"] = chunk_start + len(chunk)
+            _job_state["wrote"] = written
+            log.info(
+                "  forecast %d/%d (%d posts in %.1fs, total wrote %d)",
+                batch_i, n_batches, len(chunk), time.time() - b0, written,
+            )
+        log.info("forecast batch done in %.1fs (wrote %d)", time.time() - t0, written)
+    finally:
+        _job_state.update(state="idle", finished_at=int(time.time()), wrote=written)

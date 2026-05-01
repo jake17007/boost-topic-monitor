@@ -86,10 +86,7 @@ const RANK_INFOS: RankInfo[] = [
 export function PostCard({ post, sourceDescription, sort }: Props) {
   const data = useMemo<ChartData<"line">>(() => {
     const actual = post.series.map(([ts, score]) => ({ x: ts * 1000, y: score }));
-    // Bridge the forecast onto the last actual point so the dashed line is continuous.
-    const lastActual = actual.length ? actual[actual.length - 1] : null;
-    const forecastPts = post.forecast.map(([ts, score]) => ({ x: ts * 1000, y: score }));
-    const forecastLine = lastActual && forecastPts.length ? [lastActual, ...forecastPts] : [];
+    const forecastLine = post.forecast.map(([ts, score]) => ({ x: ts * 1000, y: score }));
 
     return {
       datasets: [

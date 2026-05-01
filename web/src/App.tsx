@@ -1,9 +1,26 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import "./chartSetup";
-import { fetchFeed, fetchSources } from "./api";
-import type { FeedItem, ModelState, Sort, SourceInfo, Window } from "./types";
+import {
+  fetchBlueskyKeywords,
+  fetchFeed,
+  fetchForecastStatus,
+  fetchSources,
+  fetchXHandles,
+  saveBlueskyKeywords,
+  saveXHandles,
+  triggerForecastRun,
+} from "./api";
+import type {
+  FeedItem,
+  ForecastStatus,
+  ModelState,
+  Sort,
+  SourceInfo,
+  Window,
+} from "./types";
 import { PostCard } from "./components/PostCard";
+import { ListEditorModal } from "./components/ListEditorModal";
 
 const REFRESH_MS = 30_000;
 
@@ -30,6 +47,9 @@ export default function App() {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [modelState, setModelState] = useState<ModelState>("unloaded");
   const [status, setStatus] = useState("loading…");
+  const [handlesOpen, setHandlesOpen] = useState(false);
+  const [keywordsOpen, setKeywordsOpen] = useState(false);
+  const [forecastJob, setForecastJob] = useState<ForecastStatus | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
   const [infoPos, setInfoPos] = useState<{ top: number; left: number } | null>(null);
   const infoRef = useRef<HTMLSpanElement | null>(null);
@@ -63,6 +83,39 @@ export default function App() {
   useEffect(() => {
     void fetchSources().then(setSources).catch(() => {});
   }, []);
+
+  // Forecast job status polling. Fast while running, slow while idle.
+  useEffect(() => {
+    let stopped = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const s = await fetchForecastStatus();
+        if (stopped) return;
+        setForecastJob(s);
+        const delay = s.state === "running" ? 1500 : 5000;
+        timer = globalThis.setTimeout(poll, delay);
+      } catch {
+        if (!stopped) timer = globalThis.setTimeout(poll, 5000);
+      }
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer != null) globalThis.clearTimeout(timer);
+    };
+  }, []);
+
+  const onRunForecast = async () => {
+    try {
+      await triggerForecastRun();
+      // Kick the next status poll to update immediately.
+      const s = await fetchForecastStatus();
+      setForecastJob(s);
+    } catch {
+      /* ignore */
+    }
+  };
 
   useEffect(() => {
     void tick();
@@ -303,6 +356,27 @@ export default function App() {
             <option value="24h">24h</option>
           </select>
         </label>
+        <button
+          type="button"
+          className="header-btn"
+          onClick={() => setHandlesOpen(true)}
+          title="Edit the X handles being monitored"
+        >
+          Edit X handles
+        </button>
+        <button
+          type="button"
+          className="header-btn"
+          onClick={() => setKeywordsOpen(true)}
+          title="Edit the Bluesky keywords used to filter the firehose"
+        >
+          Edit Bluesky keywords
+        </button>
+        <ForecastJobControl
+          job={forecastJob}
+          modelState={modelState}
+          onRun={onRunForecast}
+        />
         <span className={`model-state ${modelState}`}>{MODEL_LABEL[modelState]}</span>
         <span className="status">{status}</span>
       </header>
@@ -320,6 +394,79 @@ export default function App() {
           ))
         )}
       </main>
+      {handlesOpen && (
+        <ListEditorModal
+          title="Edit X handles"
+          hint="One handle per line (or comma-separated). No @ needed."
+          fetcher={fetchXHandles}
+          saver={saveXHandles}
+          onClose={() => {
+            setHandlesOpen(false);
+            void fetchSources().then(setSources).catch(() => {});
+            void tick();
+          }}
+        />
+      )}
+      {keywordsOpen && (
+        <ListEditorModal
+          title="Edit Bluesky keywords"
+          hint="One keyword per line (or comma-separated). Posts whose text matches any keyword will be tracked."
+          fetcher={fetchBlueskyKeywords}
+          saver={saveBlueskyKeywords}
+          onClose={() => {
+            setKeywordsOpen(false);
+            void tick();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+interface ForecastControlProps {
+  job: ForecastStatus | null;
+  modelState: ModelState;
+  onRun: () => void;
+}
+
+function ForecastJobControl({ job, modelState, onRun }: ForecastControlProps) {
+  const running = job?.state === "running";
+  const total = job?.total ?? 0;
+  const processed = job?.processed ?? 0;
+  const wrote = job?.wrote ?? 0;
+  const pct = running && total > 0 ? Math.round((processed / total) * 100) : 0;
+  const ageStr = (() => {
+    if (!job?.finished_at) return "";
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - job.finished_at);
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    return `${Math.floor(s / 3600)}h ago`;
+  })();
+  const disabled = running || modelState !== "ready";
+
+  return (
+    <div className={`forecast-ctl${running ? " running" : ""}`}>
+      <button
+        type="button"
+        className="header-btn"
+        onClick={onRun}
+        disabled={disabled}
+        title={
+          modelState !== "ready"
+            ? "TimesFM not ready"
+            : "Refresh predictions for posts with new snapshot data"
+        }
+      >
+        {running ? `Predicting ${processed}/${total}` : "Run predictions"}
+      </button>
+      {running && (
+        <div className="forecast-progress">
+          <div className="forecast-bar" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      {!running && job && job.finished_at > 0 && (
+        <span className="forecast-meta">last: wrote {wrote} · {ageStr}</span>
+      )}
     </div>
   );
 }

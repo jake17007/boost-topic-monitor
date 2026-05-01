@@ -69,9 +69,6 @@ async def snapshot_job() -> None:
     now = int(time.time())
     for source in sources.get_sources():
         await _snapshot_one(source, now)
-    # Re-forecast immediately after snapshots so predictions stay aligned with
-    # the latest engagement data.
-    await forecast.forecast_job()
 
 
 async def _snapshot_one(source: Source, now: int) -> None:

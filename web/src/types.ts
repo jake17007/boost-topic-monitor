@@ -37,3 +37,13 @@ export interface SourceInfo {
 export type Window = "1h" | "3h" | "6h" | "12h" | "24h";
 
 export type Sort = "top" | "hot" | "velocity" | "rising" | "trending";
+
+export interface ForecastStatus {
+  state: "idle" | "running";
+  total: number;
+  processed: number;
+  wrote: number;
+  started_at: number;
+  finished_at: number;
+  model_state: ModelState;
+}

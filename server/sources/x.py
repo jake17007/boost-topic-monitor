@@ -1,19 +1,14 @@
-"""X (formerly Twitter) source — follows a configurable list of handles.
+"""X (formerly Twitter) source — follows a list of handles stored in SQLite.
 
-Setup (both required, otherwise the source is not registered):
+Setup:
 
-    export X_BEARER_TOKEN="..."          # OAuth 2.0 Bearer token
-    export X_HANDLES="elonmusk,sama"     # comma-separated, no @
+    export X_BEARER_TOKEN="..."          # OAuth 2.0 Bearer token (required)
 
-Discovery: for each handle, fetch the latest posts from
-GET /2/users/{id}/tweets (handle → user_id resolved once via
-GET /2/users/by/username/{handle} and cached).
-Snapshot: batched GET /2/tweets?ids=... up to 100 ids/call, returns
-public_metrics for likes/reposts/replies/quotes.
+Handles live in the `x_handles` table and are editable from the UI.
 
-Because X reads cost real money, we lean on their 24h read-deduplication
-(repeated reads of the same post within 24h are billed once). If you blow
-through credits, set fewer handles or shorten the active window.
+Discovery: for each handle, fetch the latest posts from GET /2/users/{id}/tweets
+(handle → user_id resolved once and cached in memory).
+Snapshot: batched GET /2/tweets?ids=... up to 100 ids/call.
 Engagement metric: likes + reposts + replies + quotes.
 """
 from __future__ import annotations
@@ -26,6 +21,7 @@ from datetime import datetime
 
 import httpx
 
+from .. import db
 from .base import SourcePost
 
 log = logging.getLogger("hn-monitor.sources.x")
@@ -68,9 +64,11 @@ class XSource:
         "Note: X charges per read."
     )
 
-    def __init__(self, token: str, handles: list[str]) -> None:
+    def __init__(self, token: str) -> None:
         self._token = token
-        self._handles = [h.lstrip("@") for h in handles if h.strip()]
+        # In-memory cache of the handle list — refreshed from DB on every
+        # discovery tick so UI edits take effect immediately.
+        self._handles: list[str] = []
         self._handle_to_uid: dict[str, str] = {}  # lowercase handle -> user_id
         self._uid_to_handle: dict[str, str] = {}
         self._client: httpx.AsyncClient | None = None
@@ -80,16 +78,14 @@ class XSource:
     @classmethod
     def from_env(cls) -> "XSource | None":
         token = os.getenv("X_BEARER_TOKEN")
-        handles_env = os.getenv("X_HANDLES", "")
-        handles = [h.strip() for h in handles_env.split(",") if h.strip()]
         if not token:
             log.info("X_BEARER_TOKEN not set; X source disabled")
             return None
-        if not handles:
-            log.info("X_HANDLES not set; X source disabled")
-            return None
-        log.info("X source enabled with %d handle(s)", len(handles))
-        return cls(token, handles)
+        log.info("X source enabled (handles loaded from DB on each tick)")
+        return cls(token)
+
+    def _refresh_handles(self) -> None:
+        self._handles = db.list_x_handles()
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -148,6 +144,9 @@ class XSource:
 
     async def fetch_new_post_ids(self) -> list[str]:
         if self._rate_limited():
+            return []
+        self._refresh_handles()
+        if not self._handles:
             return []
         await self._resolve_uids()
         ids: list[str] = []

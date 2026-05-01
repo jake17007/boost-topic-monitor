@@ -35,6 +35,23 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE INDEX IF NOT EXISTS idx_snapshots_post_ts ON snapshots(post_id, ts);
 CREATE INDEX IF NOT EXISTS idx_posts_posted_ts ON posts(posted_ts);
 CREATE INDEX IF NOT EXISTS idx_posts_source ON posts(source);
+
+CREATE TABLE IF NOT EXISTS forecasts (
+  post_id        INTEGER PRIMARY KEY REFERENCES posts(id),
+  computed_at    INTEGER NOT NULL,
+  last_input_ts  INTEGER NOT NULL,
+  points         TEXT NOT NULL    -- JSON array of [ts, score]
+);
+
+CREATE TABLE IF NOT EXISTS x_handles (
+  handle    TEXT PRIMARY KEY,
+  added_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bluesky_keywords (
+  keyword   TEXT PRIMARY KEY,
+  added_at  INTEGER NOT NULL
+);
 """
 
 
@@ -199,6 +216,123 @@ def series_for_ids(ids: Iterable[int]) -> dict[int, list[tuple[int, int]]]:
     for r in rows:
         out[r["post_id"]].append((r["ts"], r["score"]))
     return out
+
+
+# --- x handles ---
+
+def list_x_handles() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT handle FROM x_handles ORDER BY added_at ASC"
+        ).fetchall()
+    return [r["handle"] for r in rows]
+
+
+def set_x_handles(handles: list[str]) -> None:
+    """Replace the entire list of handles. Lower-cases and de-dupes."""
+    cleaned = []
+    seen = set()
+    now = int(time.time())
+    for h in handles:
+        h = (h or "").strip().lstrip("@").lower()
+        if not h or h in seen:
+            continue
+        seen.add(h)
+        cleaned.append(h)
+    with connect() as conn:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM x_handles")
+        for h in cleaned:
+            conn.execute(
+                "INSERT INTO x_handles (handle, added_at) VALUES (?, ?)",
+                (h, now),
+            )
+        conn.execute("COMMIT")
+
+
+# --- bluesky keywords ---
+
+def list_bluesky_keywords() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT keyword FROM bluesky_keywords ORDER BY added_at ASC"
+        ).fetchall()
+    return [r["keyword"] for r in rows]
+
+
+def set_bluesky_keywords(keywords: list[str]) -> None:
+    """Replace the entire list. Lower-cases and de-dupes."""
+    cleaned = []
+    seen = set()
+    now = int(time.time())
+    for k in keywords:
+        k = (k or "").strip().lower()
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        cleaned.append(k)
+    with connect() as conn:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM bluesky_keywords")
+        for k in cleaned:
+            conn.execute(
+                "INSERT INTO bluesky_keywords (keyword, added_at) VALUES (?, ?)",
+                (k, now),
+            )
+        conn.execute("COMMIT")
+
+
+def seed_bluesky_keywords_if_empty(defaults: list[str]) -> None:
+    with connect() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM bluesky_keywords").fetchone()[0]
+    if n == 0 and defaults:
+        set_bluesky_keywords(defaults)
+
+
+# --- forecasts ---
+
+def get_forecast(post_id: int) -> list[tuple[int, int]]:
+    import json
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT points FROM forecasts WHERE post_id = ?", (post_id,)
+        ).fetchone()
+    if not row:
+        return []
+    try:
+        return [(int(ts), int(s)) for ts, s in json.loads(row["points"])]
+    except Exception:
+        return []
+
+
+def get_forecast_input_ts(ids: Iterable[int]) -> dict[int, int]:
+    """Return {post_id: last_input_ts} for posts that have a cached forecast."""
+    ids = list(ids)
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT post_id, last_input_ts FROM forecasts WHERE post_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    return {r["post_id"]: r["last_input_ts"] for r in rows}
+
+
+def save_forecast(post_id: int, last_input_ts: int, points: list[tuple[int, int]]) -> None:
+    import json
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO forecasts (post_id, computed_at, last_input_ts, points)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(post_id) DO UPDATE SET
+              computed_at = excluded.computed_at,
+              last_input_ts = excluded.last_input_ts,
+              points = excluded.points
+            """,
+            (post_id, int(time.time()), int(last_input_ts), json.dumps(points)),
+        )
 
 
 def feed(

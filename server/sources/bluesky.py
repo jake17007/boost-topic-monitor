@@ -6,9 +6,9 @@ streams in as JSON; we keyword-filter `record.text` and stage matches in an
 in-memory buffer. Snapshots use the public batched `app.bsky.feed.getPosts`
 endpoint to refresh likes/reposts/replies in groups of up to 25.
 
-No auth, no rate limit on either endpoint. Set keywords via:
-
-    export BLUESKY_KEYWORDS="ai,llm,gpt,claude,..."
+No auth, no rate limit. Keywords live in the `bluesky_keywords` table and are
+editable from the UI; the regex rebuilds on the next discovery tick after a
+change.
 
 Engagement score = likes + reposts + replies + quotes.
 """
@@ -17,15 +17,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 from collections import OrderedDict
 from datetime import datetime
-from typing import Iterable
 
 import httpx
 import websockets
 
+from .. import db
 from .base import SourcePost
 
 log = logging.getLogger("hn-monitor.sources.bluesky")
@@ -61,16 +60,9 @@ def _parse_iso(s: str | None) -> int | None:
         return None
 
 
-def _keywords_from_env() -> list[str]:
-    env = os.getenv("BLUESKY_KEYWORDS")
-    if env:
-        return [k.strip().lower() for k in env.split(",") if k.strip()]
-    return DEFAULT_KEYWORDS
-
-
-def _build_regex(keywords: list[str]) -> re.Pattern[str]:
-    # Word-boundary anchored alternation. Compound terms ("machine learning",
-    # "deep work") still work because \b matches around the run of word chars.
+def _build_regex(keywords: list[str]) -> re.Pattern[str] | None:
+    if not keywords:
+        return None
     alts = "|".join(re.escape(k) for k in keywords)
     return re.compile(rf"(?<!\w)(?:{alts})(?!\w)", re.IGNORECASE)
 
@@ -80,9 +72,9 @@ class BlueskySource:
     label = "Bluesky"
     description = "Live WebSocket firehose, keyword-filtered. Engagement refreshed every 60s. Metric: likes + reposts + replies."
 
-    def __init__(self, keywords: list[str] | None = None) -> None:
-        self._keywords = keywords or _keywords_from_env()
-        self._regex = _build_regex(self._keywords)
+    def __init__(self) -> None:
+        self._keywords: list[str] = []
+        self._regex: re.Pattern[str] | None = None
         # Insertion-ordered dict: source_id -> created_ts (for staging only).
         self._buffer: "OrderedDict[str, int]" = OrderedDict()
         self._buffer_lock = asyncio.Lock()
@@ -106,8 +98,18 @@ class BlueskySource:
         if self._ws_task is None or self._ws_task.done():
             self._ws_task = asyncio.create_task(self._ws_loop(), name="bsky-jetstream")
 
+    def _refresh_keywords(self) -> None:
+        kw = db.list_bluesky_keywords()
+        if kw != self._keywords:
+            self._keywords = kw
+            self._regex = _build_regex(kw)
+            log.info(
+                "[bluesky] keywords reloaded (%d): %s",
+                len(kw), ", ".join(kw) if kw else "(none — no posts will match)",
+            )
+
     async def _ws_loop(self) -> None:
-        log.info("[bluesky] keywords (%d): %s", len(self._keywords), ", ".join(self._keywords))
+        self._refresh_keywords()
         while not self._closing:
             try:
                 async with websockets.connect(
@@ -146,7 +148,7 @@ class BlueskySource:
         if record.get("reply"):
             return
         text = record.get("text") or ""
-        if not self._regex.search(text):
+        if self._regex is None or not self._regex.search(text):
             return
         did = data.get("did")
         rkey = commit.get("rkey")
@@ -160,6 +162,7 @@ class BlueskySource:
                 self._buffer.popitem(last=False)
 
     async def fetch_new_post_ids(self) -> list[str]:
+        self._refresh_keywords()
         self._ensure_ws()
         async with self._buffer_lock:
             ids = list(self._buffer.keys())

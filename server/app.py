@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -7,8 +9,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from . import db, forecast, jobs, ranking, sources
+from .sources.bluesky import DEFAULT_KEYWORDS as BLUESKY_DEFAULTS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,6 +21,24 @@ logging.basicConfig(
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIST = REPO_ROOT / "web" / "dist"
+
+
+def _load_dotenv() -> None:
+    """Tiny .env loader — sets vars in os.environ if not already present."""
+    path = REPO_ROOT / ".env"
+    if not path.exists():
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        os.environ.setdefault(key, val)
+
+
+_load_dotenv()
 
 WINDOW_RE = re.compile(r"^(\d+)([smhd])$")
 WINDOW_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -35,6 +57,7 @@ def parse_window(s: str, default: int = 6 * 3600) -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    db.seed_bluesky_keywords_if_empty(BLUESKY_DEFAULTS)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         jobs.discovery_job, "interval", seconds=30,
@@ -44,10 +67,14 @@ async def lifespan(app: FastAPI):
         jobs.snapshot_job, "interval", seconds=60,
         id="snapshot", max_instances=1, coalesce=True,
     )
+    scheduler.add_job(
+        forecast.forecast_job, "interval", seconds=3600,
+        id="forecast", max_instances=1, coalesce=True,
+    )
     scheduler.start()
     scheduler.add_job(jobs.discovery_job, id="discovery_initial")
-    # Trigger the (slow) TimesFM load early so it's ready by the time the first
-    # snapshots have accumulated. Loads on a background thread.
+    scheduler.add_job(forecast.forecast_job, id="forecast_initial")
+    # Trigger the (slow) TimesFM load on a background thread.
     forecast._start_loader()
     try:
         yield
@@ -96,6 +123,60 @@ async def api_feed(
             "items": items,
         }
     )
+
+
+class HandlesPayload(BaseModel):
+    handles: list[str]
+
+
+@app.get("/api/x/handles")
+async def api_x_handles_get():
+    return JSONResponse({"handles": db.list_x_handles()})
+
+
+@app.put("/api/x/handles")
+async def api_x_handles_put(payload: HandlesPayload):
+    db.set_x_handles(payload.handles)
+    return JSONResponse({"handles": db.list_x_handles()})
+
+
+class KeywordsPayload(BaseModel):
+    keywords: list[str]
+
+
+@app.get("/api/bluesky/keywords")
+async def api_bluesky_keywords_get():
+    return JSONResponse({"keywords": db.list_bluesky_keywords()})
+
+
+@app.put("/api/bluesky/keywords")
+async def api_bluesky_keywords_put(payload: KeywordsPayload):
+    db.set_bluesky_keywords(payload.keywords)
+    return JSONResponse({"keywords": db.list_bluesky_keywords()})
+
+
+@app.get("/api/forecast/status")
+async def api_forecast_status():
+    return JSONResponse(
+        {**forecast.get_job_state(), "model_state": forecast.model_state()}
+    )
+
+
+@app.post("/api/forecast/run")
+async def api_forecast_run():
+    state = forecast.get_job_state()
+    if state["state"] == "running":
+        return JSONResponse(
+            {"started": False, "reason": "already running", **state},
+            status_code=409,
+        )
+    if forecast.model_state() != "ready":
+        return JSONResponse(
+            {"started": False, "reason": f"model {forecast.model_state()}"},
+            status_code=503,
+        )
+    asyncio.create_task(forecast.forecast_job())
+    return JSONResponse({"started": True})
 
 
 @app.get("/api/sources")
