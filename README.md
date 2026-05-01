@@ -2,14 +2,14 @@
 
 A small local app that monitors **Hacker News**, **Bluesky**, **Product Hunt**, and **X** for new posts, snapshots their engagement once a minute, and forecasts each post's score one hour ahead with **Google's TimesFM-2.5**. The web feed lets you rank everything by current score, hot, velocity, predicted growth, or acceleration.
 
-![architecture](https://img.shields.io/badge/python-3.10%2B-blue) ![architecture](https://img.shields.io/badge/react-18-blue) ![architecture](https://img.shields.io/badge/timesfm-2.5--200m-orange)
+![python](https://img.shields.io/badge/python-3.10%2B-blue) ![react](https://img.shields.io/badge/react-18-blue) ![timesfm](https://img.shields.io/badge/timesfm-2.5--200m-orange)
 
 ## What it does
 
 1. **Discovery** — for every registered source, ingest new post IDs (HN polls `/newstories`, Bluesky reads from the Jetstream WebSocket with a keyword filter, Product Hunt fetches the daily launch list, X polls each configured handle's recent timeline).
 2. **Snapshot** — every 60s, refresh each tracked post's engagement score (HN upvotes, BSKY likes+reposts+replies+quotes, PH votes, X likes+reposts+replies+quotes) and write a `(post_id, ts, score)` row.
-3. **Forecast** — immediately after each snapshot tick, run TimesFM-2.5 on every post that gained new data, predicting the next 60 minutes. Cached in-memory by `(post_id, last_snapshot_ts)`.
-4. **Feed** — React UI shows each post as a card with its actual score line + dashed forecast line, ranked by your choice of metric.
+3. **Forecast** — TimesFM-2.5 predicts each post's score 60 minutes out. Runs once an hour automatically, plus on-demand via the **"Run predictions"** header button (live progress: `Predicting 384/2779 …`). Forecasts are persisted in `data.db` and survive restarts; posts whose history shows no engagement variation are skipped.
+4. **Feed** — React UI shows each post as a card with its actual score line + a separate dashed forecast line, ranked by your choice of metric. Default view: 100 posts.
 
 ## Sources
 
@@ -18,13 +18,22 @@ A small local app that monitors **Hacker News**, **Bluesky**, **Product Hunt**, 
 | **Hacker News** | `/newstories` polled every 30s | upvotes | none |
 | **Bluesky** | Jetstream WebSocket, regex-filtered locally | likes + reposts + replies + quotes | none |
 | **Product Hunt** | One batched GraphQL query for today's launches every 30s | votes | `PRODUCTHUNT_TOKEN` |
-| **X** | Configurable handle list, each user's recent timeline polled every 30s | likes + reposts + replies + quotes | `X_BEARER_TOKEN` + `X_HANDLES` |
+| **X** | Each handle in the `x_handles` table polled every 30s; engagement batched every 60s | likes + reposts + replies + quotes | `X_BEARER_TOKEN` |
 
-Sources self-disable if their required env vars are missing.
+Sources whose required token isn't set self-disable on startup.
+
+### Editing what gets monitored
+
+Both Bluesky's keyword filter and X's handle list live in SQLite and are editable from the header:
+
+- **Edit X handles** — comma- or newline-separated. Changes take effect on the next discovery tick (≤30 s).
+- **Edit Bluesky keywords** — same. The Jetstream regex rebuilds automatically.
+
+On first run the keyword table is seeded with sane AI / dev / productivity defaults; the handles table starts empty.
 
 ## Rank metrics
 
-Every post gets all five computed; the dropdown picks which one to sort by.
+Every post gets all five computed; the **Sort** dropdown picks which one to sort by, and each card shows all four (the active one highlighted).
 
 - **Top** — `latest_score` (highest first).
 - **Hot** — HN's `(score − 1) / (age_h + 2)^1.8`. Score discounted by post age.
@@ -46,22 +55,16 @@ cd web && npm install && npm run build && cd ..
 
 First run downloads TimesFM-2.5 (~400 MB) from Hugging Face.
 
-### Environment variables
+### Configuration
+
+Copy `.env.example` to `.env` and fill in your tokens (the server auto-loads `.env` on startup):
 
 ```bash
-# Optional — Bluesky keyword filter (defaults to AI/dev/productivity terms)
-export BLUESKY_KEYWORDS="ai,llm,gpt,claude,startup,..."
-
-# Optional — Product Hunt
-# Create a developer token at https://www.producthunt.com/v2/oauth/applications
-export PRODUCTHUNT_TOKEN="..."
-
-# Optional — X (charges per read; ~$0.005 / unique read)
-# Get a Bearer Token from a developer App attached to a Project at
-# https://developer.x.com/en/portal/projects-and-apps
-export X_BEARER_TOKEN="..."
-export X_HANDLES="elonmusk,sama,satyanadella,..."
+PRODUCTHUNT_TOKEN=...    # https://www.producthunt.com/v2/oauth/applications
+X_BEARER_TOKEN=...       # from a Project-attached app at https://developer.x.com/en/portal/projects-and-apps
 ```
+
+X charges per read (~$0.005 / unique read). Empty `.env` is fine — HN and Bluesky still work without any auth.
 
 ### Running
 
@@ -93,25 +96,34 @@ cd web && npm run dev   # http://localhost:5173, /api/* proxied to :8000
 2. Append it to `_build_sources()` in `server/sources/__init__.py`.
 3. (Optional) Add a frontend short-label and color in `web/src/components/PostCard.tsx` and `web/src/styles.css`.
 
-That's it — discovery, snapshot, forecast, ranking, and the UI badge/filter all wire up automatically.
+Discovery, snapshot, forecast, ranking, and the UI badge/filter wire up automatically.
 
 ## Layout
 
 ```
 boost-topic-monitor/
-├── server/                    # FastAPI app
-│   ├── __main__.py            # `python -m server`
-│   ├── app.py                 # routes + scheduler
-│   ├── db.py                  # SQLite schema + queries (data.db)
-│   ├── forecast.py            # TimesFM 2.5 loader + cache + job
-│   ├── jobs.py                # discovery + snapshot loops
-│   ├── ranking.py             # top/hot/velocity/rising/trending
-│   └── sources/               # one file per source + base.py protocol
-└── web/                       # Vite + React + TypeScript
+├── server/                          # FastAPI app
+│   ├── __main__.py                  # `python -m server`
+│   ├── app.py                       # routes + scheduler + .env loader
+│   ├── db.py                        # SQLite schema + queries (data.db)
+│   ├── forecast.py                  # TimesFM 2.5 loader + job + state
+│   ├── jobs.py                      # discovery + snapshot loops
+│   ├── ranking.py                   # top/hot/velocity/rising/trending
+│   └── sources/                     # one file per source + base.py protocol
+└── web/                             # Vite + React + TypeScript
     └── src/
         ├── App.tsx
-        ├── components/PostCard.tsx
-        ├── api.ts, types.ts, chartSetup.ts, styles.css
+        ├── api.ts, types.ts
+        └── components/
+            ├── PostCard.tsx
+            └── ListEditorModal.tsx  # used for both X handles & Bluesky keywords
 ```
 
-Built with React + Chart.js on the frontend, FastAPI + APScheduler + httpx + websockets on the backend, SQLite for storage, and TimesFM-2.5 (PyTorch) for forecasting.
+### Database tables (`data.db`)
+
+- `posts` — one row per discovered post (`source`, `source_id`, title, etc.)
+- `snapshots` — `(post_id, ts, score)` time series
+- `forecasts` — latest TimesFM forecast per post (`points` is JSON)
+- `x_handles`, `bluesky_keywords` — UI-editable monitoring config
+
+Built with React + Chart.js on the frontend; FastAPI + APScheduler + httpx + websockets on the backend; SQLite for storage; TimesFM-2.5 (PyTorch) for forecasting.
