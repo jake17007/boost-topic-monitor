@@ -21,6 +21,11 @@ class SourcePost:
     posted_ts: int | None   # original posting time, unix seconds
     score: int | None       # current engagement score (upvotes / votes)
     dead: bool = False      # deleted/removed/dead
+    # Optional historical (ts, score) points the source already knows about
+    # (e.g. Google Trends returns a 60-min sliding window per query). The
+    # discovery and snapshot jobs insert these into `snapshots` alongside
+    # the current value. Idempotent via the (post_id, ts) primary key.
+    history: list[tuple[int, int]] | None = None
 
 
 @runtime_checkable

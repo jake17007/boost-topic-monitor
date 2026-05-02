@@ -52,6 +52,31 @@ CREATE TABLE IF NOT EXISTS bluesky_keywords (
   keyword   TEXT PRIMARY KEY,
   added_at  INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS google_trends_keywords (
+  keyword   TEXT PRIMARY KEY,
+  added_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS google_trending_categories (
+  category_id  INTEGER PRIMARY KEY,
+  added_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS instagram_handles (
+  handle    TEXT PRIMARY KEY,
+  added_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reddit_subreddits (
+  subreddit TEXT PRIMARY KEY,
+  added_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rss_feeds (
+  url       TEXT PRIMARY KEY,
+  added_at  INTEGER NOT NULL
+);
 """
 
 
@@ -74,9 +99,16 @@ def connect():
 
 
 def known_source_ids(source: str) -> set[str]:
+    """Source_ids we've seen for this source AND haven't marked dead.
+
+    Dead items are excluded so sources can revive them — relevant for
+    googletrending, where a slug rotates off the trending list (marked
+    dead) and later returns. Other sources rarely re-emit dead ids in
+    discovery, so the change is a no-op for them.
+    """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT source_id FROM posts WHERE source = ?", (source,)
+            "SELECT source_id FROM posts WHERE source = ? AND dead = 0", (source,)
         ).fetchall()
     return {r["source_id"] for r in rows}
 
@@ -84,9 +116,17 @@ def known_source_ids(source: str) -> set[str]:
 def upsert_post(source: str, post: SourcePost) -> int:
     """Insert or update a post and return its internal id."""
     now = int(time.time())
+    # google_trends (keyword) and googletrending (category) are long-lived
+    # monitoring targets, not discrete posts — refresh first_seen on
+    # re-discovery so they stay inside the 24h active-window used by
+    # active_posts() / recent_posts().
+    refresh_first_seen = (
+        "first_seen = excluded.first_seen,"
+        if source in ("googletrends", "googletrending") else ""
+    )
     with connect() as conn:
         conn.execute(
-            """
+            f"""
             INSERT INTO posts (source, source_id, title, url, author, posted_ts, first_seen, dead)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, source_id) DO UPDATE SET
@@ -94,6 +134,7 @@ def upsert_post(source: str, post: SourcePost) -> int:
               url = excluded.url,
               author = excluded.author,
               posted_ts = excluded.posted_ts,
+              {refresh_first_seen}
               dead = excluded.dead
             """,
             (
@@ -145,6 +186,41 @@ def insert_snapshot(post_id: int, ts: int, score: int) -> None:
         )
 
 
+def insert_snapshots(post_id: int, points: list[tuple[int, int]]) -> None:
+    """Bulk insert; deduped by the (post_id, ts) primary key."""
+    if not points:
+        return
+    with connect() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO snapshots (post_id, ts, score) VALUES (?, ?, ?)",
+            [(post_id, int(ts), int(score)) for ts, score in points],
+        )
+
+
+def snapshot_counts_by_source_id(source: str, source_ids: list[str]) -> dict[str, int]:
+    """For each (source, source_id), return the snapshot count. Missing
+    source_ids map to 0. Used by backfill paths to skip items that already
+    have substantial history.
+    """
+    if not source_ids:
+        return {}
+    placeholders = ",".join("?" * len(source_ids))
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT p.source_id, COUNT(s.ts) AS n
+            FROM posts p LEFT JOIN snapshots s ON s.post_id = p.id
+            WHERE p.source = ? AND p.source_id IN ({placeholders})
+            GROUP BY p.source_id
+            """,
+            [source, *source_ids],
+        ).fetchall()
+    out = {sid: 0 for sid in source_ids}
+    for r in rows:
+        out[r["source_id"]] = int(r["n"])
+    return out
+
+
 def active_posts(source: str | None, now: int, max_age_seconds: int) -> list[dict]:
     """Return active (alive, in-window) posts, optionally filtered by source.
 
@@ -174,10 +250,14 @@ def active_post_ids(now: int, max_age_seconds: int) -> list[int]:
 
 
 def recent_posts(window_seconds: int) -> list[dict]:
-    """Posts we've been tracking in the last `window_seconds`.
+    """Posts whose creation time falls inside `window_seconds`.
 
-    Filters by `first_seen` so PH's day-boundary timestamps don't get clipped
-    by short windows; `posted_ts` is preserved for display.
+    Uses the post's actual `posted_ts` (when it was published on the source),
+    falling back to `first_seen` for sources that don't have a meaningful
+    posted_ts (e.g. Google Trends keywords). Dead posts are excluded — for
+    HN/Bluesky/X/PH/Instagram that means deleted/removed content, for
+    googletrending it means terms that rotated off the trending list or no
+    longer match the user's selected categories.
     """
     cutoff = int(time.time()) - window_seconds
     with connect() as conn:
@@ -190,8 +270,8 @@ def recent_posts(window_seconds: int) -> list[dict]:
                  WHERE s.post_id = p.id ORDER BY s.ts DESC LIMIT 1) AS latest_score,
               (SELECT COUNT(*) FROM snapshots s WHERE s.post_id = p.id) AS snapshot_count
             FROM posts p
-            WHERE p.first_seen >= ?
-            ORDER BY p.first_seen DESC
+            WHERE COALESCE(p.posted_ts, p.first_seen) >= ? AND p.dead = 0
+            ORDER BY COALESCE(p.posted_ts, p.first_seen) DESC
             """,
             (cutoff,),
         ).fetchall()
@@ -250,6 +330,122 @@ def set_x_handles(handles: list[str]) -> None:
         conn.execute("COMMIT")
 
 
+# --- instagram handles ---
+
+def list_instagram_handles() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT handle FROM instagram_handles ORDER BY added_at ASC"
+        ).fetchall()
+    return [r["handle"] for r in rows]
+
+
+def set_instagram_handles(handles: list[str]) -> None:
+    """Replace the entire list of handles. Lower-cases, strips @, de-dupes."""
+    cleaned = []
+    seen = set()
+    now = int(time.time())
+    for h in handles:
+        h = (h or "").strip().lstrip("@").lower()
+        if not h or h in seen:
+            continue
+        seen.add(h)
+        cleaned.append(h)
+    with connect() as conn:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM instagram_handles")
+        for h in cleaned:
+            conn.execute(
+                "INSERT INTO instagram_handles (handle, added_at) VALUES (?, ?)",
+                (h, now),
+            )
+        conn.execute("COMMIT")
+
+
+# --- reddit subreddits ---
+
+def list_reddit_subreddits() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT subreddit FROM reddit_subreddits ORDER BY added_at ASC"
+        ).fetchall()
+    return [r["subreddit"] for r in rows]
+
+
+def set_reddit_subreddits(subreddits: list[str]) -> None:
+    """Replace the entire list. Strips r/ prefix and de-dupes (case-insensitive)."""
+    cleaned = []
+    seen = set()
+    now = int(time.time())
+    for s in subreddits:
+        s = (s or "").strip()
+        if s.startswith("/"):
+            s = s.lstrip("/")
+        if s.lower().startswith("r/"):
+            s = s[2:]
+        s = s.strip("/")
+        key = s.lower()
+        if not s or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(s)
+    with connect() as conn:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM reddit_subreddits")
+        for s in cleaned:
+            conn.execute(
+                "INSERT INTO reddit_subreddits (subreddit, added_at) VALUES (?, ?)",
+                (s, now),
+            )
+        conn.execute("COMMIT")
+
+
+def seed_reddit_subreddits_if_empty(defaults: list[str]) -> None:
+    with connect() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM reddit_subreddits").fetchone()[0]
+    if n == 0 and defaults:
+        set_reddit_subreddits(defaults)
+
+
+# --- rss feeds ---
+
+def list_rss_feeds() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT url FROM rss_feeds ORDER BY added_at ASC"
+        ).fetchall()
+    return [r["url"] for r in rows]
+
+
+def set_rss_feeds(urls: list[str]) -> None:
+    """Replace the entire list. Trims and de-dupes."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    now = int(time.time())
+    for u in urls:
+        u = (u or "").strip()
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        cleaned.append(u)
+    with connect() as conn:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM rss_feeds")
+        for u in cleaned:
+            conn.execute(
+                "INSERT INTO rss_feeds (url, added_at) VALUES (?, ?)",
+                (u, now),
+            )
+        conn.execute("COMMIT")
+
+
+def seed_rss_feeds_if_empty(defaults: list[str]) -> None:
+    with connect() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM rss_feeds").fetchone()[0]
+    if n == 0 and defaults:
+        set_rss_feeds(defaults)
+
+
 # --- bluesky keywords ---
 
 def list_bluesky_keywords() -> list[str]:
@@ -287,6 +483,82 @@ def seed_bluesky_keywords_if_empty(defaults: list[str]) -> None:
         n = conn.execute("SELECT COUNT(*) FROM bluesky_keywords").fetchone()[0]
     if n == 0 and defaults:
         set_bluesky_keywords(defaults)
+
+
+# --- google trends keywords ---
+
+def list_google_trends_keywords() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT keyword FROM google_trends_keywords ORDER BY added_at ASC"
+        ).fetchall()
+    return [r["keyword"] for r in rows]
+
+
+def set_google_trends_keywords(keywords: list[str]) -> None:
+    """Replace the entire list. Trims and de-dupes (case-preserving)."""
+    cleaned = []
+    seen = set()
+    now = int(time.time())
+    for k in keywords:
+        k = (k or "").strip()
+        key = k.lower()
+        if not k or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(k)
+    with connect() as conn:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM google_trends_keywords")
+        for k in cleaned:
+            conn.execute(
+                "INSERT INTO google_trends_keywords (keyword, added_at) VALUES (?, ?)",
+                (k, now),
+            )
+        conn.execute("COMMIT")
+
+
+# --- google trending categories (numeric ids) ---
+
+def list_google_trending_categories() -> list[int]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT category_id FROM google_trending_categories ORDER BY added_at ASC"
+        ).fetchall()
+    return [int(r["category_id"]) for r in rows]
+
+
+def set_google_trending_categories(category_ids: list[int]) -> None:
+    """Replace the entire list of selected category ids.
+
+    Also marks all existing googletrending posts dead so the feed shows only
+    items that match the new selection — the next discovery tick un-deads
+    any matching items via upsert_post.
+    """
+    cleaned: list[int] = []
+    seen: set[int] = set()
+    now = int(time.time())
+    for cid in category_ids:
+        try:
+            i = int(cid)
+        except (TypeError, ValueError):
+            continue
+        if i in seen:
+            continue
+        seen.add(i)
+        cleaned.append(i)
+    with connect() as conn:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM google_trending_categories")
+        for cid in cleaned:
+            conn.execute(
+                "INSERT INTO google_trending_categories (category_id, added_at) VALUES (?, ?)",
+                (cid, now),
+            )
+        conn.execute(
+            "UPDATE posts SET dead = 1 WHERE source = 'googletrending'"
+        )
+        conn.execute("COMMIT")
 
 
 # --- forecasts ---

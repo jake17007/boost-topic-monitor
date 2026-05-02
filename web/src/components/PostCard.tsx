@@ -32,7 +32,37 @@ function sourceDiscussHref(source: string, sourceId: string): string {
     if (m) return `https://bsky.app/profile/${m[1]}/post/${m[2]}`;
   }
   if (source === "x") return `https://x.com/i/status/${sourceId}`;
+  if (source === "instagram") return `https://www.instagram.com/p/${sourceId}/`;
+  if (source === "reddit") return `https://redd.it/${sourceId}`;
+  if (source === "huggingfacepapers") return `https://huggingface.co/papers/${sourceId}`;
+  if (source === "huggingfaceposts") return `https://huggingface.co/posts/${sourceId}`;
+  if (source === "rss") {
+    // source_id is `<feed_url>::<entry_guid>`; many feeds use the article URL
+    // as the GUID, in which case we can use that as the discuss link too.
+    const tail = sourceId.includes("::") ? sourceId.split("::").slice(1).join("::") : sourceId;
+    return tail.startsWith("http") ? tail : "#";
+  }
+  if (source === "googletrends") {
+    return `https://trends.google.com/trends/explore?q=${encodeURIComponent(sourceId)}&geo=US`;
+  }
+  if (source === "googletrending") {
+    return `https://trends.google.com/trending?geo=US`;
+  }
   return "#";
+}
+
+function sourceMetricLabel(source: string): string {
+  if (source === "hn") return "Upvotes";
+  if (source === "producthunt") return "Votes";
+  if (source === "bluesky" || source === "x") return "Engagement";
+  if (source === "instagram") return "Views";
+  if (source === "reddit") return "Score + comments";
+  if (source === "huggingfacepapers") return "Upvotes + comments";
+  if (source === "huggingfaceposts") return "Reactions + comments";
+  if (source === "rss") return "Recency";
+  if (source === "googletrends") return "Search interest";
+  if (source === "googletrending") return "Search volume";
+  return "Score";
 }
 
 function sourceShortLabel(source: string): string {
@@ -40,6 +70,13 @@ function sourceShortLabel(source: string): string {
   if (source === "producthunt") return "PH";
   if (source === "bluesky") return "BSKY";
   if (source === "x") return "X";
+  if (source === "instagram") return "IG";
+  if (source === "reddit") return "REDDIT";
+  if (source === "huggingfacepapers") return "PAPERS";
+  if (source === "huggingfaceposts") return "HF POSTS";
+  if (source === "rss") return "RSS";
+  if (source === "googletrends") return "TRENDS";
+  if (source === "googletrending") return "TRENDING";
   return source.slice(0, 3).toUpperCase();
 }
 
@@ -91,7 +128,7 @@ export function PostCard({ post, sourceDescription, sort }: Props) {
     return {
       datasets: [
         {
-          label: "HN score",
+          label: sourceMetricLabel(post.source),
           data: actual,
           borderColor: ACCENT,
           backgroundColor: "rgba(255, 102, 0, 0.12)",
@@ -117,7 +154,7 @@ export function PostCard({ post, sourceDescription, sort }: Props) {
         },
       ],
     };
-  }, [post.series, post.forecast]);
+  }, [post.series, post.forecast, post.source]);
 
   const options = useMemo<ChartOptions<"line">>(
     () => ({
@@ -176,14 +213,7 @@ export function PostCard({ post, sourceDescription, sort }: Props) {
   const predictedFinal = post.forecast.length ? post.forecast[post.forecast.length - 1][1] : null;
   const showDelta = predictedFinal != null && post.latest_score != null;
   const delta = showDelta ? predictedFinal - (post.latest_score ?? 0) : null;
-  const scoreLabel =
-    post.source === "producthunt"
-      ? "Votes"
-      : post.source === "bluesky"
-        ? "Engagement"
-        : post.source === "x"
-          ? "Engagement"
-          : "HN score";
+  const scoreLabel = sourceMetricLabel(post.source);
 
   const ranks = post.ranks;
 
@@ -226,7 +256,7 @@ export function PostCard({ post, sourceDescription, sort }: Props) {
       <div className="card-meta">
         {post.author && (
           <>
-            {post.source === "x" ? (
+            {post.source === "x" || post.source === "instagram" ? (
               <strong className="card-author">{post.author}</strong>
             ) : (
               post.author

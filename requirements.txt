@@ -7,3 +7,9 @@ numpy>=1.26
 torch>=2.2
 # TimesFM 2.5 only ships from source; PyPI is stuck on 1.3.
 timesfm @ git+https://github.com/google-research/timesfm.git
+# Google Trends: unofficial scraper. Source self-disables if missing.
+pytrends>=4.9
+# pytrends 4.9.x uses urllib3 Retry(method_whitelist=...), removed in urllib3 2.x.
+urllib3<2
+# RSS/Atom parsing for the rss source.
+feedparser>=6.0

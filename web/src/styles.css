@@ -302,6 +302,120 @@ header h1 {
   color: #d0d4dc;
 }
 
+.source-badge.source-instagram {
+  background: rgba(228, 64, 95, 0.18);
+  color: #ff7a93;
+}
+
+.source-badge.source-reddit {
+  background: rgba(255, 69, 0, 0.18);
+  color: #ff8c52;
+}
+
+.source-badge.source-huggingfacepapers {
+  background: rgba(255, 210, 30, 0.18);
+  color: #ffd84a;
+}
+
+.source-badge.source-huggingfaceposts {
+  background: rgba(255, 159, 28, 0.18);
+  color: #ffb44d;
+}
+
+.source-badge.source-rss {
+  background: rgba(247, 126, 0, 0.18);
+  color: #ffa14d;
+}
+
+.source-badge.source-googletrends {
+  background: rgba(66, 133, 244, 0.18);
+  color: #7ab2ff;
+}
+
+.source-badge.source-googletrending {
+  background: rgba(234, 67, 53, 0.18);
+  color: #ff8a7c;
+}
+
+.cat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px 2px;
+}
+
+.cat-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.cat-option:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.cat-option.on {
+  color: #5ac8fa;
+}
+
+.cat-option input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.trending-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  align-items: center;
+}
+
+.trending-bar-label {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-right: 4px;
+}
+
+.trending-chip {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.trending-chip:hover:not(:disabled) {
+  border-color: var(--muted);
+  color: var(--text);
+}
+
+.trending-chip.on {
+  background: rgba(234, 67, 53, 0.18);
+  border-color: rgba(234, 67, 53, 0.45);
+  color: #ff8a7c;
+}
+
+.trending-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .card-title {
   flex: 1;
   font-weight: 500;

@@ -61,6 +61,8 @@ async def _discover_one(source: Source) -> None:
     now = int(time.time())
     for item in items_by_id.values():
         post_id = db.upsert_post(source.name, item)
+        if item.history:
+            db.insert_snapshots(post_id, item.history)
         if isinstance(item.score, int):
             db.insert_snapshot(post_id, now, item.score)
 
@@ -86,6 +88,8 @@ async def _snapshot_one(source: Source, now: int) -> None:
         if item.dead:
             db.mark_dead(p["id"])
             continue
+        if item.history:
+            db.insert_snapshots(p["id"], item.history)
         if not isinstance(item.score, int):
             continue
         prev = db.latest_score(p["id"])

@@ -5,9 +5,17 @@ import {
   fetchBlueskyKeywords,
   fetchFeed,
   fetchForecastStatus,
+  fetchGoogleTrendsKeywords,
+  fetchInstagramHandles,
+  fetchRedditSubreddits,
+  fetchRssFeeds,
   fetchSources,
   fetchXHandles,
   saveBlueskyKeywords,
+  saveGoogleTrendsKeywords,
+  saveInstagramHandles,
+  saveRedditSubreddits,
+  saveRssFeeds,
   saveXHandles,
   triggerForecastRun,
 } from "./api";
@@ -21,8 +29,38 @@ import type {
 } from "./types";
 import { PostCard } from "./components/PostCard";
 import { ListEditorModal } from "./components/ListEditorModal";
+import { CategoryPickerModal } from "./components/CategoryPickerModal";
+import { TrendingCategoryBar } from "./components/TrendingCategoryBar";
 
 const REFRESH_MS = 30_000;
+
+const LS_KEY = "btm.controls.v1";
+
+interface PersistedControls {
+  window?: Window;
+  sources?: string[];
+  sort?: Sort;
+}
+
+function loadControls(): PersistedControls {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    return raw ? (JSON.parse(raw) as PersistedControls) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveControls(c: PersistedControls): void {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(c));
+  } catch {
+    /* ignore quota / disabled storage */
+  }
+}
+
+const VALID_WINDOWS: Window[] = ["1h", "3h", "6h", "12h", "24h", "2d", "3d", "7d", "30d"];
+const VALID_SORTS: Sort[] = ["top", "hot", "velocity", "rising", "trending"];
 
 const MODEL_LABEL: Record<ModelState, string> = {
   unloaded: "TimesFM: not started",
@@ -40,15 +78,30 @@ const SORT_OPTIONS: { value: Sort; label: string; tip: string }[] = [
 ];
 
 export default function App() {
-  const [window, setWindow] = useState<Window>("6h");
-  const [activeSources, setActiveSources] = useState<Set<string>>(new Set()); // empty = all
-  const [sortBy, setSortBy] = useState<Sort>("top");
+  const [window, setWindow] = useState<Window>(() => {
+    const saved = loadControls().window;
+    return saved && VALID_WINDOWS.includes(saved) ? saved : "6h";
+  });
+  const [activeSources, setActiveSources] = useState<Set<string>>(() => {
+    const saved = loadControls().sources;
+    return new Set(Array.isArray(saved) ? saved : []);
+  }); // empty = all
+  const [sortBy, setSortBy] = useState<Sort>(() => {
+    const saved = loadControls().sort;
+    return saved && VALID_SORTS.includes(saved) ? saved : "top";
+  });
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [modelState, setModelState] = useState<ModelState>("unloaded");
   const [status, setStatus] = useState("loading…");
   const [handlesOpen, setHandlesOpen] = useState(false);
+  const [igHandlesOpen, setIgHandlesOpen] = useState(false);
+  const [redditSubsOpen, setRedditSubsOpen] = useState(false);
+  const [rssFeedsOpen, setRssFeedsOpen] = useState(false);
   const [keywordsOpen, setKeywordsOpen] = useState(false);
+  const [trendsOpen, setTrendsOpen] = useState(false);
+  const [trendingCatsOpen, setTrendingCatsOpen] = useState(false);
+  const [trendingBarKey, setTrendingBarKey] = useState(0);
   const [forecastJob, setForecastJob] = useState<ForecastStatus | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
   const [infoPos, setInfoPos] = useState<{ top: number; left: number } | null>(null);
@@ -127,6 +180,11 @@ export default function App() {
   useEffect(() => {
     void tick();
   }, [window, activeSources, sortBy, tick]);
+
+  // Persist controls so a reload reopens the same view.
+  useEffect(() => {
+    saveControls({ window, sources: [...activeSources], sort: sortBy });
+  }, [window, activeSources, sortBy]);
 
   const sourceMap = useMemo(() => {
     const m: Record<string, SourceInfo> = {};
@@ -282,7 +340,19 @@ export default function App() {
                           ? "BSKY"
                           : s.name === "x"
                             ? "X"
-                            : s.name.toUpperCase()}
+                            : s.name === "instagram"
+                              ? "IG"
+                              : s.name === "huggingfacepapers"
+                                ? "PAPERS"
+                                : s.name === "huggingfaceposts"
+                                  ? "HF POSTS"
+                                  : s.name === "rss"
+                                    ? "RSS"
+                                    : s.name === "googletrends"
+                                      ? "TRENDS"
+                                      : s.name === "googletrending"
+                                        ? "TRENDING"
+                                        : s.name.toUpperCase()}
                   </span>
                   <span className="info-desc">{s.description}</span>
                 </div>
@@ -354,6 +424,10 @@ export default function App() {
             <option value="6h">6h</option>
             <option value="12h">12h</option>
             <option value="24h">24h</option>
+            <option value="2d">2d</option>
+            <option value="3d">3d</option>
+            <option value="7d">7d</option>
+            <option value="30d">30d</option>
           </select>
         </label>
         <button
@@ -367,10 +441,50 @@ export default function App() {
         <button
           type="button"
           className="header-btn"
+          onClick={() => setIgHandlesOpen(true)}
+          title="Edit the Instagram creators being monitored (via Apify)"
+        >
+          Edit Instagram handles
+        </button>
+        <button
+          type="button"
+          className="header-btn"
+          onClick={() => setRedditSubsOpen(true)}
+          title="Edit the subreddits being monitored"
+        >
+          Edit Reddit subreddits
+        </button>
+        <button
+          type="button"
+          className="header-btn"
+          onClick={() => setRssFeedsOpen(true)}
+          title="Edit the RSS/Atom feeds being polled (frontier-AI lab blogs by default)"
+        >
+          Edit RSS feeds
+        </button>
+        <button
+          type="button"
+          className="header-btn"
           onClick={() => setKeywordsOpen(true)}
           title="Edit the Bluesky keywords used to filter the firehose"
         >
           Edit Bluesky keywords
+        </button>
+        <button
+          type="button"
+          className="header-btn"
+          onClick={() => setTrendsOpen(true)}
+          title="Edit the Google Trends keywords being monitored"
+        >
+          Edit Trends keywords
+        </button>
+        <button
+          type="button"
+          className="header-btn"
+          onClick={() => setTrendingCatsOpen(true)}
+          title="Pick which Google Trending Now categories to track"
+        >
+          Edit Trending categories
         </button>
         <ForecastJobControl
           job={forecastJob}
@@ -380,6 +494,12 @@ export default function App() {
         <span className={`model-state ${modelState}`}>{MODEL_LABEL[modelState]}</span>
         <span className="status">{status}</span>
       </header>
+      {activeSources.size === 1 && activeSources.has("googletrending") && (
+        <TrendingCategoryBar
+          onChange={() => void tick()}
+          refreshKey={trendingBarKey}
+        />
+      )}
       <main className="feed">
         {feed.length === 0 ? (
           <div className="empty">No posts yet — discovery runs every 30s.</div>
@@ -407,6 +527,45 @@ export default function App() {
           }}
         />
       )}
+      {igHandlesOpen && (
+        <ListEditorModal
+          title="Edit Instagram handles"
+          hint="One creator per line (or comma-separated). No @ needed. Posts/reels refresh every ~5 min via Apify."
+          fetcher={fetchInstagramHandles}
+          saver={saveInstagramHandles}
+          onClose={() => {
+            setIgHandlesOpen(false);
+            void fetchSources().then(setSources).catch(() => {});
+            void tick();
+          }}
+        />
+      )}
+      {redditSubsOpen && (
+        <ListEditorModal
+          title="Edit Reddit subreddits"
+          hint="One subreddit per line (or comma-separated). No r/ prefix needed."
+          fetcher={fetchRedditSubreddits}
+          saver={saveRedditSubreddits}
+          onClose={() => {
+            setRedditSubsOpen(false);
+            void fetchSources().then(setSources).catch(() => {});
+            void tick();
+          }}
+        />
+      )}
+      {rssFeedsOpen && (
+        <ListEditorModal
+          title="Edit RSS feeds"
+          hint="One feed URL per line. RSS or Atom — feedparser handles both. Score is a recency decay (no engagement metric)."
+          fetcher={fetchRssFeeds}
+          saver={saveRssFeeds}
+          onClose={() => {
+            setRssFeedsOpen(false);
+            void fetchSources().then(setSources).catch(() => {});
+            void tick();
+          }}
+        />
+      )}
       {keywordsOpen && (
         <ListEditorModal
           title="Edit Bluesky keywords"
@@ -415,6 +574,27 @@ export default function App() {
           saver={saveBlueskyKeywords}
           onClose={() => {
             setKeywordsOpen(false);
+            void tick();
+          }}
+        />
+      )}
+      {trendsOpen && (
+        <ListEditorModal
+          title="Edit Google Trends keywords"
+          hint="One search term per line (or comma-separated). Each becomes a tracked card with a 0–100 interest score (US, ~1-min resolution)."
+          fetcher={fetchGoogleTrendsKeywords}
+          saver={saveGoogleTrendsKeywords}
+          onClose={() => {
+            setTrendsOpen(false);
+            void tick();
+          }}
+        />
+      )}
+      {trendingCatsOpen && (
+        <CategoryPickerModal
+          onClose={() => {
+            setTrendingCatsOpen(false);
+            setTrendingBarKey((k) => k + 1);
             void tick();
           }}
         />

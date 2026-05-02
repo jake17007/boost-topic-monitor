@@ -34,7 +34,7 @@ export interface SourceInfo {
   description: string;
 }
 
-export type Window = "1h" | "3h" | "6h" | "12h" | "24h";
+export type Window = "1h" | "3h" | "6h" | "12h" | "24h" | "2d" | "3d" | "7d" | "30d";
 
 export type Sort = "top" | "hot" | "velocity" | "rising" | "trending";
 

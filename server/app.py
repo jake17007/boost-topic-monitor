@@ -13,6 +13,8 @@ from pydantic import BaseModel
 
 from . import db, forecast, jobs, ranking, sources
 from .sources.bluesky import DEFAULT_KEYWORDS as BLUESKY_DEFAULTS
+from .sources.reddit import DEFAULT_SUBREDDITS as REDDIT_DEFAULTS
+from .sources.rss import DEFAULT_FEEDS as RSS_DEFAULTS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,13 +53,15 @@ def parse_window(s: str, default: int = 6 * 3600) -> int:
     if not m:
         return default
     n, unit = int(m.group(1)), m.group(2)
-    return min(n * WINDOW_UNITS[unit], 7 * 86400)
+    return min(n * WINDOW_UNITS[unit], 90 * 86400)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
     db.seed_bluesky_keywords_if_empty(BLUESKY_DEFAULTS)
+    db.seed_reddit_subreddits_if_empty(REDDIT_DEFAULTS)
+    db.seed_rss_feeds_if_empty(RSS_DEFAULTS)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         jobs.discovery_job, "interval", seconds=30,
@@ -140,6 +144,47 @@ async def api_x_handles_put(payload: HandlesPayload):
     return JSONResponse({"handles": db.list_x_handles()})
 
 
+@app.get("/api/instagram/handles")
+async def api_instagram_handles_get():
+    return JSONResponse({"handles": db.list_instagram_handles()})
+
+
+@app.put("/api/instagram/handles")
+async def api_instagram_handles_put(payload: HandlesPayload):
+    db.set_instagram_handles(payload.handles)
+    return JSONResponse({"handles": db.list_instagram_handles()})
+
+
+class SubredditsPayload(BaseModel):
+    subreddits: list[str]
+
+
+@app.get("/api/reddit/subreddits")
+async def api_reddit_subreddits_get():
+    return JSONResponse({"subreddits": db.list_reddit_subreddits()})
+
+
+@app.put("/api/reddit/subreddits")
+async def api_reddit_subreddits_put(payload: SubredditsPayload):
+    db.set_reddit_subreddits(payload.subreddits)
+    return JSONResponse({"subreddits": db.list_reddit_subreddits()})
+
+
+class FeedsPayload(BaseModel):
+    feeds: list[str]
+
+
+@app.get("/api/rss/feeds")
+async def api_rss_feeds_get():
+    return JSONResponse({"feeds": db.list_rss_feeds()})
+
+
+@app.put("/api/rss/feeds")
+async def api_rss_feeds_put(payload: FeedsPayload):
+    db.set_rss_feeds(payload.feeds)
+    return JSONResponse({"feeds": db.list_rss_feeds()})
+
+
 class KeywordsPayload(BaseModel):
     keywords: list[str]
 
@@ -153,6 +198,40 @@ async def api_bluesky_keywords_get():
 async def api_bluesky_keywords_put(payload: KeywordsPayload):
     db.set_bluesky_keywords(payload.keywords)
     return JSONResponse({"keywords": db.list_bluesky_keywords()})
+
+
+@app.get("/api/google_trends/keywords")
+async def api_google_trends_keywords_get():
+    return JSONResponse({"keywords": db.list_google_trends_keywords()})
+
+
+@app.put("/api/google_trends/keywords")
+async def api_google_trends_keywords_put(payload: KeywordsPayload):
+    db.set_google_trends_keywords(payload.keywords)
+    return JSONResponse({"keywords": db.list_google_trends_keywords()})
+
+
+class CategoriesPayload(BaseModel):
+    category_ids: list[int]
+
+
+@app.get("/api/google_trending/categories")
+async def api_google_trending_categories_get():
+    return JSONResponse({"category_ids": db.list_google_trending_categories()})
+
+
+@app.put("/api/google_trending/categories")
+async def api_google_trending_categories_put(payload: CategoriesPayload):
+    db.set_google_trending_categories(payload.category_ids)
+    return JSONResponse({"category_ids": db.list_google_trending_categories()})
+
+
+@app.get("/api/google_trending/category_options")
+async def api_google_trending_category_options():
+    from .sources.googletrending import CATEGORY_CATALOG
+    return JSONResponse(
+        {"options": [{"id": cid, "label": label} for cid, label in CATEGORY_CATALOG]}
+    )
 
 
 @app.get("/api/forecast/status")
