@@ -10,6 +10,7 @@ export interface Post {
   dead: 0 | 1;
   latest_score: number | null;
   snapshot_count: number;
+  thumbnail_url: string | null;
 }
 
 // [unix_seconds, score]

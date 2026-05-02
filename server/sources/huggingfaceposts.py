@@ -105,6 +105,15 @@ class HuggingFacePostsSource:
             return None
         source_id = f"{author_handle}/{slug}"
         url = f"https://huggingface.co/posts/{author_handle}/{slug}"
+        # Prefer an image attachment; fall back to the author's avatar so the
+        # card always has *some* thumbnail.
+        thumb: str | None = None
+        for att in item.get("attachments") or []:
+            if att.get("type") == "image" and att.get("url"):
+                thumb = str(att["url"])
+                break
+        if not thumb:
+            thumb = author.get("avatarUrl")
         return SourcePost(
             source_id=source_id,
             title=_excerpt(item),
@@ -113,6 +122,7 @@ class HuggingFacePostsSource:
             posted_ts=_parse_iso(item.get("publishedAt")),
             score=_total_reactions(item) + int(item.get("numComments") or 0),
             dead=False,
+            thumbnail_url=str(thumb) if thumb else None,
         )
 
     async def fetch_new_post_ids(self) -> list[str]:

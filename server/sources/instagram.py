@@ -209,6 +209,7 @@ class InstagramSource:
         caption = (item.get("caption") or "").strip()
         title = caption[:200] if caption else None
         url = item.get("url") or f"https://www.instagram.com/p/{short}/"
+        thumb = item.get("displayUrl") or item.get("thumbnailUrl")
         return SourcePost(
             source_id=short,
             title=title,
@@ -217,6 +218,7 @@ class InstagramSource:
             posted_ts=posted_ts,
             score=_engagement(item),
             dead=False,
+            thumbnail_url=str(thumb) if thumb else None,
         )
 
     async def fetch_new_post_ids(self) -> list[str]:

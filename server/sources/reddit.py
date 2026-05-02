@@ -14,6 +14,7 @@ Engagement metric: score + num_comments.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import time
 
@@ -152,6 +153,20 @@ class RedditSource:
                 score = int(data.get("score") or 0) + int(data.get("num_comments") or 0)
                 created = data.get("created_utc")
                 posted_ts = int(created) if isinstance(created, (int, float)) else None
+                # Prefer the high-res preview image; fall back to the thumbnail
+                # field if it's a real URL (Reddit uses sentinels like
+                # "default"/"self"/"nsfw" otherwise).
+                thumb: str | None = None
+                preview = data.get("preview") or {}
+                imgs = preview.get("images") or []
+                if imgs:
+                    src = (imgs[0].get("source") or {}).get("url")
+                    if src:
+                        thumb = html.unescape(src)
+                if not thumb:
+                    t = data.get("thumbnail")
+                    if isinstance(t, str) and t.startswith("http"):
+                        thumb = html.unescape(t)
                 out[str(pid)] = SourcePost(
                     source_id=str(pid),
                     title=data.get("title"),
@@ -160,6 +175,7 @@ class RedditSource:
                     posted_ts=posted_ts,
                     score=score,
                     dead=dead,
+                    thumbnail_url=thumb,
                 )
         return out
 

@@ -51,6 +51,22 @@ function sourceDiscussHref(source: string, sourceId: string): string {
   return "#";
 }
 
+// Hosts that block direct browser fetches via Cross-Origin-Resource-Policy.
+// We route them through our same-origin /api/img proxy.
+const PROXIED_THUMB_HOSTS = ["cdninstagram.com", "fbcdn.net"];
+
+function thumbnailHref(url: string): string {
+  try {
+    const host = new URL(url).hostname;
+    if (PROXIED_THUMB_HOSTS.some((h) => host.endsWith(h))) {
+      return `/api/img?url=${encodeURIComponent(url)}`;
+    }
+  } catch {
+    /* invalid URL — let the browser try as-is */
+  }
+  return url;
+}
+
 function sourceMetricLabel(source: string): string {
   if (source === "hn") return "Upvotes";
   if (source === "producthunt") return "Votes";
@@ -219,6 +235,27 @@ export function PostCard({ post, sourceDescription, sort }: Props) {
 
   return (
     <article className="card">
+      {post.thumbnail_url && (
+        <a
+          className="card-thumb-wrap"
+          href={titleHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={post.title ?? undefined}
+        >
+          <img
+            className="card-thumb"
+            src={thumbnailHref(post.thumbnail_url)}
+            alt=""
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            onError={(e) => {
+              (e.currentTarget.parentElement as HTMLElement).style.display = "none";
+            }}
+          />
+        </a>
+      )}
+      <div className="card-body">
       <header className="card-head">
         <div className="card-title-block">
           <span
@@ -296,6 +333,7 @@ export function PostCard({ post, sourceDescription, sort }: Props) {
         ) : (
           <div className="card-empty">no snapshots yet</div>
         )}
+      </div>
       </div>
     </article>
   );

@@ -79,6 +79,7 @@ class HuggingFacePapersSource:
             authors = paper.get("authors") or []
             if authors:
                 author_name = authors[0].get("name")
+        thumbnail = item.get("thumbnail") or paper.get("thumbnail")
         return SourcePost(
             source_id=str(arxiv_id),
             title=item.get("title") or paper.get("title"),
@@ -89,6 +90,7 @@ class HuggingFacePapersSource:
             ),
             score=upvotes + num_comments,
             dead=False,
+            thumbnail_url=str(thumbnail) if thumbnail else None,
         )
 
     async def fetch_new_post_ids(self) -> list[str]:

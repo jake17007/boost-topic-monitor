@@ -4,10 +4,12 @@ import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
+import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -256,6 +258,54 @@ async def api_forecast_run():
         )
     asyncio.create_task(forecast.forecast_job())
     return JSONResponse({"started": True})
+
+
+# Hosts whose images need to be proxied because they set
+# Cross-Origin-Resource-Policy headers that block direct browser fetches.
+ALLOWED_IMG_HOST_SUFFIXES = (
+    ".cdninstagram.com",
+    ".fbcdn.net",
+    "cdninstagram.com",
+    "fbcdn.net",
+)
+_img_client: httpx.AsyncClient | None = None
+
+
+def _img_host_allowed(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    h = hostname.lower()
+    return any(h == suf.lstrip(".") or h.endswith(suf) for suf in ALLOWED_IMG_HOST_SUFFIXES)
+
+
+@app.get("/api/img")
+async def api_img(url: str = Query(..., min_length=8)):
+    """Same-origin proxy for thumbnail hosts that block hotlinking via CORP.
+
+    Safelisted hosts only — this endpoint is not a generic open proxy.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not _img_host_allowed(parsed.hostname):
+        raise HTTPException(status_code=403, detail="host not allowed")
+    global _img_client
+    if _img_client is None:
+        _img_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, connect=5.0),
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (boost-topic-monitor)"},
+        )
+    try:
+        r = await _img_client.get(url)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"upstream fetch failed: {e}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code)
+    media_type = r.headers.get("content-type") or "image/jpeg"
+    return Response(
+        content=r.content,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/api/sources")

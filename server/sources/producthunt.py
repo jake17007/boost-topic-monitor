@@ -48,6 +48,7 @@ query DailyLaunches($first: Int!) {
         createdAt
         votesCount
         commentsCount
+        thumbnail { url }
         user { name username }
       }
     }
@@ -76,6 +77,7 @@ def _node_to_post(node: dict) -> SourcePost:
         title = f"{name} — {tagline}"
     else:
         title = name or tagline or None
+    thumb = (node.get("thumbnail") or {}).get("url")
     return SourcePost(
         source_id=str(node["id"]),
         title=title,
@@ -84,6 +86,7 @@ def _node_to_post(node: dict) -> SourcePost:
         posted_ts=_parse_iso(node.get("createdAt")),
         score=node.get("votesCount") if isinstance(node.get("votesCount"), int) else None,
         dead=False,
+        thumbnail_url=str(thumb) if thumb else None,
     )
 
 

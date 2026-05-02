@@ -69,8 +69,10 @@ async def _discover_one(source: Source) -> None:
 
 async def snapshot_job() -> None:
     now = int(time.time())
-    for source in sources.get_sources():
-        await _snapshot_one(source, now)
+    await asyncio.gather(
+        *(_snapshot_one(s, now) for s in sources.get_sources()),
+        return_exceptions=False,
+    )
 
 
 async def _snapshot_one(source: Source, now: int) -> None:
@@ -88,6 +90,8 @@ async def _snapshot_one(source: Source, now: int) -> None:
         if item.dead:
             db.mark_dead(p["id"])
             continue
+        if item.thumbnail_url:
+            db.update_thumbnail_if_missing(p["id"], item.thumbnail_url)
         if item.history:
             db.insert_snapshots(p["id"], item.history)
         if not isinstance(item.score, int):

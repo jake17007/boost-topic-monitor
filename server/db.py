@@ -13,15 +13,16 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS posts (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  source      TEXT NOT NULL,
-  source_id   TEXT NOT NULL,
-  title       TEXT,
-  url         TEXT,
-  author      TEXT,
-  posted_ts   INTEGER,
-  first_seen  INTEGER NOT NULL,
-  dead        INTEGER NOT NULL DEFAULT 0,
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  source        TEXT NOT NULL,
+  source_id     TEXT NOT NULL,
+  title         TEXT,
+  url           TEXT,
+  author        TEXT,
+  posted_ts     INTEGER,
+  first_seen    INTEGER NOT NULL,
+  dead          INTEGER NOT NULL DEFAULT 0,
+  thumbnail_url TEXT,
   UNIQUE(source, source_id)
 );
 
@@ -83,6 +84,11 @@ CREATE TABLE IF NOT EXISTS rss_feeds (
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # Idempotent column adds for pre-existing databases.
+        try:
+            conn.execute("ALTER TABLE posts ADD COLUMN thumbnail_url TEXT")
+        except sqlite3.OperationalError:
+            pass  # already exists
 
 
 @contextmanager
@@ -127,15 +133,16 @@ def upsert_post(source: str, post: SourcePost) -> int:
     with connect() as conn:
         conn.execute(
             f"""
-            INSERT INTO posts (source, source_id, title, url, author, posted_ts, first_seen, dead)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO posts (source, source_id, title, url, author, posted_ts, first_seen, dead, thumbnail_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, source_id) DO UPDATE SET
               title = excluded.title,
               url = excluded.url,
               author = excluded.author,
               posted_ts = excluded.posted_ts,
               {refresh_first_seen}
-              dead = excluded.dead
+              dead = excluded.dead,
+              thumbnail_url = COALESCE(excluded.thumbnail_url, posts.thumbnail_url)
             """,
             (
                 source,
@@ -146,6 +153,7 @@ def upsert_post(source: str, post: SourcePost) -> int:
                 post.posted_ts,
                 now,
                 1 if post.dead else 0,
+                post.thumbnail_url,
             ),
         )
         row = conn.execute(
@@ -158,6 +166,15 @@ def upsert_post(source: str, post: SourcePost) -> int:
 def mark_dead(post_id: int) -> None:
     with connect() as conn:
         conn.execute("UPDATE posts SET dead = 1 WHERE id = ?", (post_id,))
+
+
+def update_thumbnail_if_missing(post_id: int, thumbnail_url: str) -> None:
+    """Backfill thumbnail_url on existing rows that don't have one yet."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE posts SET thumbnail_url = ? WHERE id = ? AND thumbnail_url IS NULL",
+            (thumbnail_url, post_id),
+        )
 
 
 def latest_score(post_id: int) -> int | None:
@@ -265,7 +282,7 @@ def recent_posts(window_seconds: int) -> list[dict]:
             """
             SELECT
               p.id, p.source, p.source_id, p.title, p.url, p.author,
-              p.posted_ts, p.first_seen, p.dead,
+              p.posted_ts, p.first_seen, p.dead, p.thumbnail_url,
               (SELECT score FROM snapshots s
                  WHERE s.post_id = p.id ORDER BY s.ts DESC LIMIT 1) AS latest_score,
               (SELECT COUNT(*) FROM snapshots s WHERE s.post_id = p.id) AS snapshot_count
